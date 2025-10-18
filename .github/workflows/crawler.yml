@@ -1,0 +1,71 @@
+name: GitHub Crawler Pipeline
+
+on:
+  workflow_dispatch:   # allows you to manually run the workflow
+  schedule:
+    - cron: "0 0 * * *"  # optional: runs daily at midnight (UTC)
+
+jobs:
+  crawl-stars:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:13
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: github_data
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      # Step 1: Checkout repo code
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # Step 2: Set up Python
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      # Step 3: Install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Step 4: Wait for Postgres to be ready
+      - name: Wait for Postgres
+        run: sleep 15
+
+      # Step 5: Run crawler
+      - name: Run GitHub crawler
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PGHOST: localhost
+          PGPORT: 5432
+          PGUSER: postgres
+          PGPASSWORD: postgres
+          PGDATABASE: github_data
+        run: |
+          python github_crawler.py
+
+      # Step 6: Export results (optional)
+      - name: Export DB to CSV
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          psql "postgresql://postgres:postgres@localhost:5432/github_data" -c "\COPY repositories TO 'repos.csv' CSV HEADER"
+
+      # Step 7: Upload CSV as artifact
+      - name: Upload results
+        uses: actions/upload-artifact@v3
+        with:
+          name: repo-data
+          path: repos.csv
