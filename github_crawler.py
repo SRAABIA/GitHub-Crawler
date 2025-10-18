@@ -42,7 +42,7 @@ target_count = 100000  # total repos you want
 while has_next_page and len(repositories) < target_count:
     query = f"""
     {{
-      search(query: "stars:>1", type: REPOSITORY, first: 100, after: {json.dumps(after_cursor) if after_cursor else "null"}) {{
+      search(query: "stars:10..50", type: REPOSITORY, first: 100, after: {json.dumps(after_cursor) if after_cursor else "null"}) {{
         pageInfo {{
           endCursor
           hasNextPage
