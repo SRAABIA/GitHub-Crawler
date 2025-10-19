@@ -59,7 +59,7 @@ jobs:
           PGPASSWORD: postgres
           PGDATABASE: github_data
         run: |
-          python -m github_crawler.main
+          python main.py
 
       # Step 6: Export results to CSV
       - name: Export DB to CSV
