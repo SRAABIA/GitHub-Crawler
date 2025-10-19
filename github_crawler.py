@@ -33,7 +33,7 @@ def connect_db():
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS repositories (
                 id SERIAL PRIMARY KEY,
-                repo_id BIGINT UNIQUE,   
+                repo_id TEXT UNIQUE,   
                 name_with_owner TEXT UNIQUE,
                 stars INT,
                 last_updated TIMESTAMP DEFAULT NOW()
@@ -96,7 +96,7 @@ def fetch_repositories(query, after_cursor=None):
 def save_to_db(cursor, conn, repos):
     """Insert or update repository data using repo_id."""
     for repo in repos:
-        repo_id = int(repo["id"])
+        repo_id = repo["id"]
         name = repo["nameWithOwner"]
         stars = repo["stargazerCount"]
 
