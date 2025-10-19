@@ -3,127 +3,182 @@ import requests
 import json
 import time
 import psycopg2
+from psycopg2.extras import execute_values
+from collections import deque
+
 
 # --- GitHub API setup ---
 url = "https://api.github.com/graphql"
-token = os.getenv("GITHUB_TOKEN", "YOUR_PERSONAL_ACCESS_TOKEN")
+token = os.getenv("GITHUB_TOKEN")
 headers = {"Authorization": f"Bearer {token}"}
 
 # --- PostgreSQL setup ---
 conn = psycopg2.connect(
-    host=os.getenv("PGHOST", "localhost"),
-    port=os.getenv("PGPORT", "5432"),
-    database=os.getenv("PGDATABASE", "github_data"),
-    user=os.getenv("PGUSER", "postgres"),
-    password=os.getenv("PGPASSWORD", "YOUR_LOCAL_DB_PASSWORD")
+    host=os.getenv("PGHOST"),
+    port=os.getenv("PGPORT"),
+    database=os.getenv("PGDATABASE"),
+    user=os.getenv("PGUSER"),
+    password=os.getenv("PGPASSWORD")
 )
 cursor = conn.cursor()
 
-# --- Create table if not exists ---
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS repositories (
     id SERIAL PRIMARY KEY,
     name_with_owner TEXT UNIQUE,
     stars INT,
+    created_at DATE,
     last_updated TIMESTAMP DEFAULT NOW()
 );
 """)
 conn.commit()
 
-# --- Define multiple star ranges to bypass 1000-result limit ---
-star_ranges = [
-    "stars:1..10",
-    "stars:11..50",
-    "stars:51..100",
-    "stars:101..500",
-    "stars:501..1000",
-    "stars:1001..5000",
-    "stars:5001..10000",
-    "stars:10001..50000",
-    "stars:>50000"
-]
-
-repositories = []
-target_count = 100_000  # you can adjust this as needed
-
-for star_range in star_ranges:
-    after_cursor = None
+def fetch_repos_for_range(star_query):
+    """
+    Fetch repositories for a given star range with proper pagination and rate-limit handling.
+    """
     has_next_page = True
-    print(f"\n🔍 Fetching repos for range: {star_range}")
+    after_cursor = None
+    total = 0
+    repos = []
 
-    while has_next_page and len(repositories) < target_count:
-        query = f"""
-        {{
-          rateLimit {{
-            cost
-            remaining
-            resetAt
-          }}
-          search(query: "{star_range}", type: REPOSITORY, first: 100, after: {json.dumps(after_cursor) if after_cursor else "null"}) {{
-            pageInfo {{
-              endCursor
-              hasNextPage
-            }}
-            nodes {{
-              ... on Repository {{
-                nameWithOwner
-                stargazerCount
-              }}
-            }}
-          }}
-        }}
-        """
+    query = """
+    query($cursor: String, $starQuery: String!) {
+      rateLimit {
+        limit
+        cost
+        remaining
+        resetAt
+      }
+      search(query: $starQuery, type: REPOSITORY, first: 100, after: $cursor) {
+        pageInfo {
+          endCursor
+          hasNextPage
+        }
+        nodes {
+          ... on Repository {
+            nameWithOwner
+            stargazerCount
+          }
+        }
+      }
+    }
+    """
 
-        response = requests.post(url, json={"query": query}, headers=headers)
-        data = response.json()
+    while has_next_page:
+        variables = {"cursor": after_cursor, "starQuery": f"stars:{star_query}"}
 
-        # --- Error handling ---
-        if "errors" in data:
-            print("Error:", data["errors"])
-            break
-
-        # --- Rate limit info ---
-        rate = data["data"]["rateLimit"]
-        cost = rate["cost"]
-        remaining = rate["remaining"]
-        reset_time = rate["resetAt"]
-        print(f"⚙️ Cost: {cost} | Remaining: {remaining} | Resets at: {reset_time}")
-
-        if remaining < 50:
-            reset_epoch = int(time.mktime(time.strptime(reset_time, "%Y-%m-%dT%H:%M:%SZ")))
-            sleep_seconds = max(0, reset_epoch - int(time.time())) + 10
-            print(f"⏸️ Near rate limit. Sleeping for {sleep_seconds/60:.1f} minutes...")
-            time.sleep(sleep_seconds)
+        try:
+            response = requests.post(url, json={"query": query, "variables": variables}, headers=headers)
+            data = response.json()
+        except Exception as e:
+            print(f"❌ Network or JSON error for range {star_query}: {e}")
+            time.sleep(5)
             continue
 
-        # --- Extract data ---
+        # --- Handle GraphQL or rate errors ---
+        if "errors" in data:
+            print(f"⚠️ API error for {star_query}: {data['errors']}")
+            time.sleep(5)
+            continue
+
+        if "data" not in data or not data["data"]:
+            print(f"⚠️ No data field for {star_query}. Full response: {data}")
+            time.sleep(10)
+            continue
+
+        # --- Read rate limit info ---
+        rate = data["data"]["rateLimit"]
+        remaining = rate["remaining"]
+        reset_time = rate["resetAt"]
+
+        if remaining < 20:
+            reset_timestamp = datetime.fromisoformat(reset_time.replace("Z", "+00:00"))
+            wait_seconds = (reset_timestamp - datetime.utcnow()).total_seconds()
+            wait_seconds = max(wait_seconds, 60)
+            print(f"⏸️ Rate limit near exhaustion ({remaining} left). Sleeping {int(wait_seconds)}s until reset...")
+            time.sleep(wait_seconds)
+            continue
+
+        # --- Extract search results ---
         search_data = data["data"]["search"]
-        batch = search_data["nodes"]
-        repositories.extend(batch)
+        nodes = search_data["nodes"]
+        repos.extend(nodes)
+        total += len(nodes)
 
         after_cursor = search_data["pageInfo"]["endCursor"]
         has_next_page = search_data["pageInfo"]["hasNextPage"]
 
-        # --- Insert batch into DB ---
-        for repo in batch:
-            name = repo["nameWithOwner"]
-            stars = repo["stargazerCount"]
-            cursor.execute("""
+        print(f"✅ Collected {len(nodes)} repos this page (Total: {total}) | Remaining API calls: {remaining}")
+
+        # --- Respectful short sleep ---
+        time.sleep(0.5)
+
+        # --- Stop early if GitHub caps to 1000 for safety ---
+        if total >= 1000:
+            print(f"🧭 Hit 1000 cap for {star_query}, moving to next range.")
+            break
+
+    return repos, total
+
+# --- Dynamic partitioning + batch processing ---
+queue = deque()
+queue.append((1, 200000))  # initial wide range
+target_total = 100000
+total_saved = 0
+batch_buffer = []  # stores repos temporarily before bulk insert
+batch_size = 500   # adjust this for optimal speed (100–1000 typical)
+
+while queue and total_saved < target_total:
+    low, high = queue.popleft()
+    star_query = f"{low}..{high}"
+    print(f"🔍 Fetching range: stars:{star_query}")
+
+    repos, count = fetch_repos_for_range(star_query)
+    print(f"→ Got {count} repos for stars:{star_query}")
+
+    if count == 1000 and high - low > 1:
+        # Split dense range
+        mid = (low + high) // 2
+        queue.append((low, mid))
+        queue.append((mid + 1, high))
+        print(f"📉 Range too dense, splitting into {low}..{mid} and {mid+1}..{high}")
+    else:
+        for repo in repos:
+            batch_buffer.append((repo["nameWithOwner"], repo["stargazerCount"]))
+            
+            # Once batch is full, insert all at once
+            if len(batch_buffer) >= batch_size:
+                execute_values(cursor, """
+                    INSERT INTO repositories (name_with_owner, stars)
+                    VALUES %s
+                    ON CONFLICT (name_with_owner) DO UPDATE
+                    SET stars = EXCLUDED.stars,
+                        last_updated = NOW();
+                """, batch_buffer)
+                conn.commit()
+                total_saved += len(batch_buffer)
+                print(f"✅ Inserted batch of {len(batch_buffer)} (Total saved: {total_saved})")
+                batch_buffer.clear()
+
+        # After processing this range, insert any leftovers
+        if batch_buffer:
+            execute_values(cursor, """
                 INSERT INTO repositories (name_with_owner, stars)
-                VALUES (%s, %s)
+                VALUES %s
                 ON CONFLICT (name_with_owner) DO UPDATE
                 SET stars = EXCLUDED.stars,
                     last_updated = NOW();
-            """, (name, stars))
+            """, batch_buffer)
+            conn.commit()
+            total_saved += len(batch_buffer)
+            print(f"✅ Final batch inserted ({len(batch_buffer)} items) — Total: {total_saved}")
+            batch_buffer.clear()
 
-        conn.commit()
-        print(f"✅ Saved {len(repositories)} repos so far ({star_range})")
-        time.sleep(1)  # small delay between requests
+    if total_saved >= target_total:
+        print(f"\n🎉 Reached target of {target_total} repos!")
+        break
 
-        # stop early if total target reached
-        if len(repositories) >= target_count:
-            break
-
+print(f"\n🏁 Done! {total_saved} repositories saved to PostgreSQL.")
 cursor.close()
 conn.close()
-print(f"\n🎉 Done! {len(repositories)} repositories saved to PostgreSQL.")
