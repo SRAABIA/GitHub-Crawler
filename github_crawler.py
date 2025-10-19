@@ -33,6 +33,7 @@ def connect_db():
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS repositories (
                 id SERIAL PRIMARY KEY,
+                repo_id BIGINT UNIQUE,   
                 name_with_owner TEXT UNIQUE,
                 stars INT,
                 last_updated TIMESTAMP DEFAULT NOW()
@@ -56,6 +57,7 @@ def fetch_repositories(query, after_cursor=None):
         }}
         nodes {{
           ... on Repository {{
+            id
             nameWithOwner
             stargazerCount
           }}
@@ -91,22 +93,21 @@ def fetch_repositories(query, after_cursor=None):
         return None, None, False
 
 # ---------------- SAVE TO DATABASE ----------------
-def save_to_db(cursor, conn, repos, seen):
-    """Insert repository data, skip duplicates."""
+def save_to_db(cursor, conn, repos):
+    """Insert or update repository data using repo_id."""
     for repo in repos:
+        repo_id = int(repo["id"])
         name = repo["nameWithOwner"]
-        if name in seen:
-            continue
-        seen.add(name)
         stars = repo["stargazerCount"]
+
         try:
             cursor.execute("""
-                INSERT INTO repositories (name_with_owner, stars)
-                VALUES (%s, %s)
-                ON CONFLICT (name_with_owner) DO UPDATE
+                INSERT INTO repositories (repo_id, name_with_owner, stars, last_updated)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (repo_id) DO UPDATE
                 SET stars = EXCLUDED.stars,
                     last_updated = NOW();
-            """, (name, stars))
+            """, (repo_id, name, stars))
         except Exception as e:
             print(f"⚠️ Failed to insert {name}: {e}")
             conn.rollback()
@@ -116,13 +117,20 @@ def save_to_db(cursor, conn, repos, seen):
 # ---------------- MAIN WORKFLOW ----------------
 def main():
     conn, cursor = connect_db()
-    seen = set()
-    total_saved = 0
+    progress = load_progress()
+    total_saved = progress["total_saved"]
+
+    start_from_range = progress["current_range"]
+    resume_cursor = progress["after_cursor"]
 
     try:
         for star_range in STAR_RANGES:
+            # Skip previously completed ranges
+            if start_from_range and STAR_RANGES.index(star_range) < STAR_RANGES.index(start_from_range):
+                continue
+
             print(f"\n🚀 Fetching repos for range: {star_range}")
-            after_cursor = None
+            after_cursor = resume_cursor if start_from_range == star_range else None
             has_next_page = True
 
             while has_next_page and total_saved < TARGET_COUNT:
@@ -130,28 +138,35 @@ def main():
                 if not repos:
                     break
 
-                save_to_db(cursor, conn, repos, seen)
-                total_saved = len(seen)
+                save_to_db(cursor, conn, repos)
+                total_saved += len(repos)
 
+                # ✅ Save progress after each batch
+                save_progress(star_range, after_cursor, total_saved)
                 print(f"✅ Total saved so far: {total_saved}")
 
                 if total_saved >= TARGET_COUNT:
                     break
 
-                time.sleep(1)  # safety delay
+                time.sleep(1)
+
+            # Reset cursor for next range
+            resume_cursor = None
 
             if total_saved >= TARGET_COUNT:
                 break
 
     except KeyboardInterrupt:
-        print("\n🛑 Interrupted manually. Exiting cleanly...")
+        print("\n🛑 Interrupted manually. Progress saved.")
+        save_progress(star_range, after_cursor, total_saved)
     except Exception as e:
         print(f"❌ Unexpected error: {e}")
+        save_progress(star_range, after_cursor, total_saved)
     finally:
         cursor.close()
         conn.close()
-        print(f"\n🎉 Done! {total_saved} repositories saved to PostgreSQL.")
-
+        print(f"\n🎉 Done! {total_saved} repositories saved. Progress saved to {STATE_FILE}.")
+        
 # ---------------- ENTRY ----------------
 if __name__ == "__main__":
     main()
