@@ -1,4 +1,4 @@
-# 🐙 GitHub Crawler – Software Engineer Take-Home Assignment
+# 🐙 GitHub Crawler
 
 ## 📘 Overview
 This project automates the process of retrieving **star counts for 100,000 public GitHub repositories** using the **GitHub GraphQL API**.  
