@@ -30,6 +30,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           
+      - name: Force IPv4 for Supabase host
+        run: |
+          IPV4=$(getent ahostsv4 ${{ secrets.PGHOST }} | head -n 1 | awk '{print $1}')
+          echo "$IPV4  ${{ secrets.PGHOST }}" | sudo tee -a /etc/hosts
+          
       # Step 4: Run crawler
       - name: Run GitHub crawler
         env:
