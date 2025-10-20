@@ -65,7 +65,7 @@ jobs:
       - name: Export DB to CSV
         run: |
           sudo apt-get update && sudo apt-get install -y postgresql-client
-          psql "postgresql://${{ secrets.DB_USER }}:${{ secrets.DB_PASSWORD }}@${{ secrets.DB_HOST }}:${{ secrets.DB_PORT }}/${{ secrets.DB_NAME }}" \
+          psql "postgresql://${{ secrets.PGUSER }}:${{ secrets.PGPASSWORD }}@${{ secrets.PGHOST }}:${{ secrets.PGPORT }}/${{ secrets.PGNAME }}" \
           -c "\COPY repositories TO 'repos.csv' CSV HEADER"
       # Step 7: Upload CSV as artifact
       - name: Upload results
