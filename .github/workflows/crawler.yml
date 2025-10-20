@@ -2,8 +2,8 @@ name: GitHub Crawler Pipeline
 
 on:
   workflow_dispatch:   # allows manual trigger
-  schedule:
-    - cron: "0 * * * *"   # runs every hour (UTC)
+  # schedule:
+    # - cron: "0 * * * *"   # runs every hour (UTC)
 
 concurrency:
   group: github-crawler
