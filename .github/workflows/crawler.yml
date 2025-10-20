@@ -53,11 +53,11 @@ jobs:
       - name: Run GitHub crawler
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PGHOST: localhost
-          PGPORT: 5432
-          PGUSER: postgres
-          PGPASSWORD: postgres
-          PGDATABASE: github_data
+          PGHOST: ${{ secrets.PGHOST }}
+          PGPORT: ${{ secrets.PGPORT }}
+          PGUSER: ${{ secrets.PGUSER }}
+          PGPASSWORD: ${{ secrets.PGPASSWORD }}
+          PGDATABASE: ${{ secrets.PGDATABASE }}
         run: |
           python main.py
 
@@ -65,8 +65,8 @@ jobs:
       - name: Export DB to CSV
         run: |
           sudo apt-get update && sudo apt-get install -y postgresql-client
-          psql "postgresql://postgres:postgres@localhost:5432/github_data" -c "\COPY repositories TO 'repos.csv' CSV HEADER"
-
+          psql "postgresql://${{ secrets.DB_USER }}:${{ secrets.DB_PASSWORD }}@${{ secrets.DB_HOST }}:${{ secrets.DB_PORT }}/${{ secrets.DB_NAME }}" \
+          -c "\COPY repositories TO 'repos.csv' CSV HEADER"
       # Step 7: Upload CSV as artifact
       - name: Upload results
         uses: actions/upload-artifact@v4
